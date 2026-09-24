@@ -13,7 +13,9 @@ jobs:
           git config --global user.name ci
           git config --global user.email "ci@users.noreply.github.com"
       - name: Syntaxe des scripts
-        run: for f in install.sh bin/* shell/atelier.sh; do bash -n "$f"; done
+        run: |
+          for f in install.sh bin/dsk bin/dskf bin/dsksolde bin/team bin/atelier shell/atelier.sh; do bash -n "$f"; done
+          python3 -m py_compile bin/dskstats hooks/*.py team/*.py
       - name: Moteur d'equipe
         run: python3 -B -m unittest discover -s team -p 'test_*.py'
       - name: Hooks et installeur
@@ -22,4 +24,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck -S warning -s bash install.sh bin/* shell/atelier.sh
+      - run: shellcheck -S warning -s bash install.sh bin/dsk bin/dskf bin/dsksolde bin/team bin/atelier shell/atelier.sh
