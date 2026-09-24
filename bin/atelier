@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# atelier : outils de l'Atelier Claude.
+#
+#   atelier doctor     verifie l'installation (outils, cle, hooks, import)
+#   atelier contexte   affiche ce que Claude recoit au demarrage dans ce dossier
+#   atelier key        enregistre ou remplace la cle DeepSeek (et la teste)
+#   atelier mode [m]   affiche le mode par defaut, ou le fixe (auto|normal|atelier|solo)
+#   atelier version
+set -uo pipefail
+
+ATELIER_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="${ATELIER_ENV:-$HOME/.claude/atelier.env}"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+ok()   { printf '  \033[32mok\033[0m   %s\n' "$*"; }
+warn() { printf '  \033[33m!!\033[0m   %s\n' "$*"; }
+ko()   { printf '  \033[31mKO\033[0m   %s\n' "$*"; FAIL=1; }
+
+env_set() {  # env_set CLE VALEUR : remplace ou ajoute une ligne du fichier de config
+  local k="$1" v="$2" tmp
+  touch "$ENV_FILE"; chmod 600 "$ENV_FILE"
+  tmp="$(mktemp)"
+  grep -v "^$k=" "$ENV_FILE" > "$tmp" || true
+  printf '%s=%s\n' "$k" "$v" >> "$tmp"
+  cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"
+}
+env_get() { sed -n "s/^$1=//p" "$ENV_FILE" 2>/dev/null | tail -1 | tr -d "\"'"; }
+
+cmd_doctor() {
+  FAIL=0
+  echo "Outils"
+  for t in claude git python3 curl; do
+    if command -v "$t" >/dev/null; then ok "$t"; else ko "$t introuvable"; fi
+  done
+  command -v rtk >/dev/null && ok "rtk (compression des sorties, optionnel)" || warn "rtk absent (optionnel : https://github.com/rtk-ai/rtk)"
+
+  echo "Installation"
+  [[ -f "$ATELIER_HOME/core/WORKFLOW.md" ]] && ok "regles : $ATELIER_HOME/core/WORKFLOW.md" || ko "WORKFLOW.md manquant"
+  grep -q 'atelier/core/WORKFLOW.md' "$CLAUDE_DIR/CLAUDE.md" 2>/dev/null && ok "import dans $CLAUDE_DIR/CLAUDE.md" || ko "import absent de CLAUDE.md (relance install.sh)"
+  if python3 - "$CLAUDE_DIR/settings.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+h = json.dumps(s.get("hooks", {}))
+sys.exit(0 if "atelier/hooks/session_context.py" in h and "atelier/hooks/bash_guard.py" in h else 1)
+PY
+  then ok "hooks declares dans settings.json"; else ko "hooks absents de settings.json (relance install.sh)"; fi
+  [[ -f "$CLAUDE_DIR/skills/team/SKILL.md" ]] && ok "skill team" || warn "skill team absent"
+
+  echo "DeepSeek"
+  local key; key="$(env_get DEEPSEEK_API_KEY)"
+  if [[ -z "$key" ]]; then
+    warn "pas de cle : mode solo (tout sur Claude). 'atelier key' pour en ajouter une."
+  else
+    ok "cle presente (${key:0:5}...)"
+    local perm; perm="$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE" 2>/dev/null)"
+    [[ "$perm" == "600" ]] && ok "droits du fichier de cle : 600" || warn "droits de $ENV_FILE : $perm (conseille : chmod 600)"
+    if out="$("$ATELIER_HOME/bin/dsksolde" 2>&1)"; then ok "$out"; else ko "solde illisible : $out"; fi
+  fi
+
+  echo "Mode"
+  ok "par defaut : $(env_get ATELIER_MODE | grep . || echo auto)"
+  [[ $FAIL -eq 0 ]] && echo "Tout est en place." || { echo "Des points sont a corriger (KO ci-dessus)."; return 1; }
+}
+
+cmd_key() {
+  local key="${1:-}"
+  if [[ -z "$key" ]]; then
+    printf 'Cle API DeepSeek (https://platform.deepseek.com/api_keys), vide pour annuler : '
+    read -rs key; echo
+  fi
+  [[ -n "$key" ]] || { echo "annule"; return 1; }
+  env_set DEEPSEEK_API_KEY "$key"
+  echo "cle enregistree dans $ENV_FILE (droits 600)."
+  "$ATELIER_HOME/bin/dsksolde" || echo "!! la cle ne repond pas : verifie-la, ou le solde du compte."
+}
+
+cmd_mode() {
+  local m="${1:-}"
+  if [[ -z "$m" ]]; then
+    echo "mode par defaut : $(env_get ATELIER_MODE | grep . || echo auto)"
+    echo "(auto = normal si une cle DeepSeek est presente, sinon solo ; 'co' force atelier)"
+    return 0
+  fi
+  case "$m" in auto|normal|atelier|solo) env_set ATELIER_MODE "$m"; echo "mode par defaut : $m" ;;
+    *) echo "mode inconnu : $m (auto|normal|atelier|solo)" >&2; return 1 ;; esac
+}
+
+case "${1:-}" in
+  doctor)   cmd_doctor ;;
+  contexte) python3 "$ATELIER_HOME/hooks/session_context.py" --texte ;;
+  key)      shift; cmd_key "$@" ;;
+  mode)     shift; cmd_mode "$@" ;;
+  version)  cat "$ATELIER_HOME/VERSION" 2>/dev/null || echo inconnue ;;
+  ""|-h|--help|help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0" ;;
+  *) echo "atelier: commande inconnue : $1" >&2; exit 1 ;;
+esac

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# dskf : dsk sur le petit modele DeepSeek. Chercher, compter, resumer.
+DSK_MODEL=flash exec "$(dirname "$0")/dsk" "$@"

@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""dskstats : est-ce que la delegation a DeepSeek a vraiment lieu ?
+
+Lit ~/.claude/metrics/dsk.jsonl (un appel dsk par ligne) et dsk-solde.jsonl (un
+instantane du solde par jour). Affiche appels, echecs, duree et depense.
+  dskstats          7 derniers jours
+  dskstats 30       30 derniers jours
+"""
+import json, os, sys
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta
+
+M = os.environ.get("DSK_METRICS_DIR") or os.path.expanduser("~/.claude/metrics")
+jours = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 7
+depuis = date.today() - timedelta(days=jours - 1)
+
+def lignes(nom):
+    try:
+        with open(os.path.join(M, nom)) as f:
+            for l in f:
+                try: yield json.loads(l)
+                except ValueError: pass
+    except OSError:
+        return
+
+appels = [a for a in lignes("dsk.jsonl") if datetime.fromisoformat(a["ts"]).date() >= depuis]
+if not appels:
+    print(f"Aucun appel dsk sur {jours} jours : la delegation n'a pas lieu.")
+    sys.exit(0)
+
+par_jour = defaultdict(list)
+for a in appels:
+    par_jour[a["ts"][:10]].append(a)
+modeles = Counter(a["model"] for a in appels)
+echecs = [a for a in appels if a["rc"] != 0]
+duree = sum(a["secondes"] for a in appels)
+projets = Counter(os.path.basename(a["cwd"].rstrip("/")) or "/" for a in appels)
+
+print(f"dsk sur {jours} jours : {len(appels)} appels, {len(echecs)} en echec, "
+      f"{duree // 60} min de travail delegue")
+print("  modeles : " + ", ".join(f"{m} {n}" for m, n in modeles.most_common()))
+print("  projets : " + ", ".join(f"{p} {n}" for p, n in projets.most_common(5)))
+print("\n  jour        appels  echecs  minutes")
+for j in sorted(par_jour):
+    l = par_jour[j]
+    print(f"  {j}  {len(l):6}  {sum(a['rc'] != 0 for a in l):6}  {sum(a['secondes'] for a in l) // 60:7}")
+
+soldes = sorted({s["date"]: float(s["solde"]) for s in lignes("dsk-solde.jsonl")}.items())
+depense = sum(max(0.0, a - b) for (_, a), (_, b) in zip(soldes, soldes[1:]) if _ >= str(depuis))
+if len(soldes) >= 2:
+    print(f"\n  depense estimee : {depense:.2f} USD (solde actuel {soldes[-1][1]:.2f} USD, recharges ignorees)")
+elif soldes:
+    print(f"\n  solde au {soldes[-1][0]} : {soldes[-1][1]:.2f} USD (la depense apparaitra demain)")
+if echecs:
+    print(f"\n  dernier echec : {echecs[-1]['ts']} dans {echecs[-1]['cwd']} (rc={echecs[-1]['rc']})")

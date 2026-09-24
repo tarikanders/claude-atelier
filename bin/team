@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# team : equipe d'agents dsk specialises, lances en parallele. 0 token de quota Anthropic.
+#
+#   team start  <run>                        cree .team/<run>/ et son CONTEXTE.md
+#   team wave   <run> role:brief.md [...]    lance N roles EN PARALLELE, attend, resume
+#   team run    <run> <role> <brief.md>      un seul role, bloquant
+#   team status <run>                        l'etat de chaque agent du run
+#   team roles                               les roles disponibles
+#   team plan   <run>                        valide PLAN.json puis affiche l'etat
+#   team phase  <run> <phase>                lance les taches dsk pretes de la phase
+#   team accept <run> <tache> [--relu-opus]  accepte une tache en review
+#   team fix    <run> <tache> "<motif>"      renvoie une tache en changes_requested
+#   team retry  <run> <tache> "<motif>"      relance une tache coincee (blocked, ...)
+#   team close  <run> <phase>                ferme la phase (checks d'integration)
+#
+# wave et run valident les briefs (valide.py) AVANT de lancer quoi que ce soit.
+# Front matter du brief : `paths: src/a.ts, src/b.ts` (fichiers que touche un
+# ecrivain) et `risk: normal|sensitive` (zone sensible -> `risk: sensitive`).
+# Le mode plan (plan/phase/accept/fix/retry/close) pilote un PLAN.json : il est ecrit
+# A LA MAIN par le manager, `team start` ne le genere jamais.
+#
+# Chaque agent ecrit son rapport dans .team/<run>/<role>.md ; sa derniere ligne est un
+# STATUT repris par le manager. La sortie brute va dans <role>.log : jamais dans le
+# contexte du manager. En mode plan, le rapport est ecrit par TACHE (<TACHE_ID>.md).
+
+set -uo pipefail
+
+ATELIER_BIN="$(cd "$(dirname "$0")" && pwd)"
+TEAM_HOME="${TEAM_HOME:-$(dirname "$ATELIER_BIN")/team}"
+ROLES_DIR="$TEAM_HOME/roles"
+DSK="${DSK_BIN:-$ATELIER_BIN/dsk}"
+VALIDE="${TEAM_VALIDE:-$TEAM_HOME/valide.py}"
+PLANPY="${TEAM_PLAN:-$TEAM_HOME/plan.py}"
+
+die() { printf 'team: %s\n' "$*" >&2; exit 1; }
+rundir() { printf '%s/%s' "${TEAM_RUN_ROOT:-$PWD/.team}" "$1"; }
+
+valider_vague() {
+  local d="${1:?usage: valider_vague <run-dir> role:brief [...]}"; shift
+  if [[ "${TEAM_NO_VALIDATION:-0}" == "1" ]]; then
+    printf '!! VALIDATION DESACTIVEE (TEAM_NO_VALIDATION=1) : tu es seul responsable des conflits\n' >&2
+    return 0
+  fi
+  [[ -f "$VALIDE" ]] || die "valide.py introuvable"
+  python3 "$VALIDE" --run-dir "$d" "$@" || die "vague refusee : rien n'a ete lance"
+}
+
+# plan_fichier <run> -> chemin du PLAN.json du run, ou die si mode manuel.
+plan_fichier() {
+  local run="${1:?usage: plan_fichier <run>}"
+  local d; d="$(rundir "$run")"
+  [[ -d "$d" ]] || die "run inconnu : $run : lance d'abord : team start $run"
+  [[ -f "$PLANPY" ]] || die "plan.py introuvable"
+  local PLAN="$d/PLAN.json"
+  [[ -f "$PLAN" ]] || die "pas de PLAN.json dans $run : ce run est en mode manuel (wave/run)"
+  printf '%s\n' "$PLAN"
+}
+
+cmd_roles() {
+  local f
+  for f in "$ROLES_DIR"/*.md; do
+    [[ -e "$f" ]] || continue
+    printf '%s\n' "$(basename "$f" .md)"
+  done
+}
+
+cmd_start() {
+  local run="${1:?usage: team start <run>}"
+  local d; d="$(rundir "$run")"
+  mkdir -p "$d" || die "impossible de creer $d"
+  printf '*\n' > "${TEAM_RUN_ROOT:-$PWD/.team}/.gitignore" 2>/dev/null || true
+  if [[ ! -f "$d/CONTEXTE.md" ]]; then
+    cat > "$d/CONTEXTE.md" <<'CTX'
+# Contexte partage du run
+
+<!-- Le manager remplit ce fichier AVANT de lancer la moindre vague.
+     Tous les agents le recoivent en tete de leur brief. Il doit contenir :
+     - le depot et le chemin exact du code concerne
+     - la stack et les conventions a respecter
+     - la commande de test/lint a lancer
+     - ce qu'on sait DEJA, pour que personne ne le redecouvre
+     - ce qui est hors perimetre -->
+
+<!-- Format de brief attendu : front matter `paths:` (fichiers que touche un
+     ecrivain) et `risk: normal|sensitive`; wave/run valident avant de lancer. -->
+CTX
+  fi
+  printf '%s\n' "$d"
+}
+
+# lancer_agent <run-dir> <role> <brief> <prefixe>
+# Construit le prompt (role + CONTEXTE.md + brief + contrat de sortie), lance dsk,
+# detecte une panne solde/auth DeepSeek, extrait le STATUT. Fichiers de sortie
+# nommes par le PREFIXE : <prefixe>.md (rapport, ecrit par l'agent), <prefixe>.log
+# (sortie brute), .statut-<prefixe> (derniere ligne STATUT).
+# Retourne : 0 = STATUT OK, 1 = dsk sorti non-zero, 2 = panne solde/auth,
+# 3 = aucune ligne STATUT, 4 = STATUT non-OK (BLOQUE/PARTIEL/?).
+lancer_agent() {
+  local d="${1:?usage: lancer_agent <run-dir> <role> <brief> <prefixe>}"
+  local role="$2" brief="$3" prefixe="$4"
+  local rf="$ROLES_DIR/$role.md"
+  if [[ ! -r "$rf" ]]; then
+    printf 'STATUT: BLOQUE - role inconnu : %s\n' "$role" > "$d/.statut-$prefixe"
+    return 2
+  fi
+
+  local model; model="$(sed -n 's/^model:[[:space:]]*//p' "$rf" | head -1)"
+  model="${model:-pro}"
+
+  local report="$d/$prefixe.md" log="$d/$prefixe.log" stf="$d/.statut-$prefixe"
+  local prompt
+  prompt="$(
+    sed '/^model:[[:space:]]/d' "$rf"
+    printf '\n\n# Contexte partage du run\n\n'
+    cat "$d/CONTEXTE.md" 2>/dev/null
+    printf '\n\n# Ta tache\n\n'
+    cat "$brief"
+    printf '\n\n# Contrat de sortie : non negociable\n\n'
+    printf -- '- Ecris ton rapport complet dans `%s` (cree le fichier).\n' "$report"
+    printf -- '- Les rapports des autres agents du run sont dans `%s/` : tu peux les lire.\n' "$d"
+    printf -- '- Ne dump JAMAIS de code dans ta reponse. Le code va dans les fichiers du depot.\n'
+    printf -- '- Ta toute derniere ligne de sortie est la SEULE que le manager lit. Elle vaut :\n'
+    printf -- '  STATUT: OK|PARTIEL|BLOQUE - <resume factuel, 15 mots max>\n'
+    printf -- '- Si tu ne peux pas faire la tache, dis BLOQUE et pourquoi. Ne bluffe pas.\n'
+  )"
+
+  local rc
+  DSK_MODEL="$model" "$DSK" -p "$prompt" >"$log" 2>&1
+  rc=$?
+
+  if grep -qiE 'insufficient balance|authentication_error|invalid api key|invalid_api_key|402 ' "$log"; then
+    printf 'STATUT: BLOQUE - AUTH ou SOLDE DeepSeek epuise (voir %s)\n' "$log" > "$stf"
+    printf 'team: %s bloque : AUTH ou SOLDE DeepSeek epuise (voir %s)\n' "$prefixe" "$log" >&2
+    return 2
+  fi
+
+  local statut; statut="$(grep -oE 'STATUT:.*' "$log" | tail -1)"
+  if [[ -z "$statut" ]]; then
+    statut="STATUT: ? - aucune ligne STATUT (rc=$rc), lire $log"
+    printf '%s\n' "$statut" > "$stf"
+    printf 'team: %s bloque : aucune ligne STATUT (rc=%s)\n' "$prefixe" "$rc" >&2
+    return 3
+  fi
+  printf '%s\n' "$statut" > "$stf"
+
+  # Le code retour du dsk compte : sorti non-zero = echec, meme avec un STATUT.
+  if [[ $rc -ne 0 ]]; then
+    printf 'team: %s en echec (dsk rc=%s) : %s\n' "$prefixe" "$rc" "$statut" >&2
+    return 1
+  fi
+
+  # review UNIQUEMENT si la ligne STATUT vaut OK ; PARTIEL/BLOQUE/? -> blocked.
+  if [[ "$statut" =~ ^STATUT:[[:space:]]*OK ]]; then
+    return 0
+  fi
+  printf 'team: %s bloque : %s\n' "$prefixe" "$statut" >&2
+  return 4
+}
+
+# rapporter_tache <plan> <run-dir> <tache> <rc>
+# Traduit le code retour de lancer_agent : 0 -> review, sinon -> blocked (avec la
+# raison a l'ecran, lue dans .statut-<tache>).
+rapporter_tache() {
+  local PLAN="$1" d="$2" id="$3" rc="$4"
+  if [[ $rc -eq 0 ]]; then
+    python3 "$PLANPY" rapporter --plan "$PLAN" --tache "$id" --etat review \
+      || die "rapporter a echoue pour $id"
+  else
+    python3 "$PLANPY" rapporter --plan "$PLAN" --tache "$id" --etat blocked \
+      || die "rapporter a echoue pour $id"
+    printf 'team: %s bloque : %s\n' "$id" "$(cat "$d/.statut-$id" 2>/dev/null)" >&2
+  fi
+}
+
+cmd_run() {
+  local run="${1:?usage: team run <run> <role> <brief.md>}"
+  local role="${2:?role manquant}"
+  local brief="${3:?brief manquant}"
+  local d; d="$(rundir "$run")"
+  [[ -d "$d" ]] || die "run inconnu : $run : lance d'abord : team start $run"
+  local rf="$ROLES_DIR/$role.md"
+  [[ -r "$rf" ]] || die "role inconnu : $role : dispo : $(cmd_roles | tr '\n' ' ')"
+  [[ -r "$brief" ]] || die "brief illisible : $brief"
+  valider_vague "$d" "$role:$brief"
+  lancer_agent "$d" "$role" "$brief" "$role"
+}
+
+cmd_wave() {
+  local run="${1:?usage: team wave <run> role:brief.md [...]}"; shift
+  [[ $# -gt 0 ]] || die "usage: team wave <run> role:brief.md [role:brief.md ...]"
+  local spec role brief d
+  d="$(rundir "$run")"
+  valider_vague "$d" "$@"
+  local -a pids=()
+  for spec in "$@"; do
+    role="${spec%%:*}"; brief="${spec#*:}"
+    [[ "$role" != "$spec" ]] || die "format attendu role:brief.md : recu : $spec"
+    cmd_run "$run" "$role" "$brief" >/dev/null 2>&1 &
+    pids+=("$!")
+  done
+  printf 'team: %d agents en parallele sur le run « %s »...\n' "${#pids[@]}" "$run"
+  local i fail=0
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || fail=$((fail+1))
+  done
+  printf '\n'
+  cmd_status "$run"
+  if [[ $fail -gt 0 ]]; then
+    printf '\n!! %d agent(s) en echec : lis les .log avant de conclure quoi que ce soit.\n' "$fail" >&2
+  fi
+  return 0
+}
+
+cmd_status() {
+  local run="${1:?usage: team status <run>}"
+  local d; d="$(rundir "$run")"
+  [[ -d "$d" ]] || die "run inconnu : $run"
+  printf 'run : %s\n\n' "$d"
+  local f role st found=0
+  for f in "$d"/.statut-*; do
+    [[ -e "$f" ]] || continue
+    found=1
+    role="$(basename "$f")"; role="${role#.statut-}"
+    st="$(cat "$f")"
+    printf '  %-12s %s\n' "$role" "$st"
+  done
+  [[ $found -eq 1 ]] || printf '  (aucun agent lance)\n'
+  printf '\nrapports : '
+  local r
+  for r in "$d"/*.md; do [[ -e "$r" ]] && printf '%s ' "$(basename "$r")"; done
+  printf '\n'
+}
+
+cmd_plan() {
+  local run="${1:?usage: team plan <run>}"
+  local PLAN; PLAN="$(plan_fichier "$run")"
+  python3 "$PLANPY" valider --plan "$PLAN" || die "plan refuse : corrige $PLAN"
+  python3 "$PLANPY" etat --plan "$PLAN"
+}
+
+cmd_phase() {
+  local run="${1:?usage: team phase <run> <phase>}"
+  local phase="${2:?phase manquante}"
+  local PLAN; PLAN="$(plan_fichier "$run")"
+  local d; d="$(dirname "$PLAN")"
+
+  # 1. valider le plan avant toute mutation.
+  python3 "$PLANPY" valider --plan "$PLAN" || die "plan refuse : corrige $PLAN"
+
+  # 2. taches pretes de la phase (id, executant, brief, groupe).
+  local prets; prets="$(python3 "$PLANPY" prets --plan "$PLAN" --phase "$phase")" || die "prets a echoue"
+  if [[ -z "$prets" ]]; then
+    printf 'team: aucune tache prete pour la phase %s\n' "$phase"
+    return 0
+  fi
+
+  local -a opus=() dsk_ids=() dsk_exec=() dsk_brief=()
+  local id exec brief _groupe
+  while IFS=$'\t' read -r id exec brief _groupe; do
+    [[ -n "$id" ]] || continue
+    if [[ "$exec" == "opus" ]]; then
+      opus+=("$id")
+    else
+      dsk_ids+=("$id"); dsk_exec+=("$exec"); dsk_brief+=("$brief")
+    fi
+  done <<< "$prets"
+
+  # 3. les taches opus ne sont jamais lancees : on les liste pour le manager.
+  if [[ ${#opus[@]} -gt 0 ]]; then
+    local liste="" i
+    for i in "${opus[@]}"; do liste="${liste}${liste:+, }$i"; done
+    printf -- '-- a faire par opus (moi) : %s\n' "$liste"
+  fi
+
+  [[ ${#dsk_ids[@]} -gt 0 ]] || return 0
+
+  # 4. passer les taches dsk a running (une seule mutation atomique).
+  local csv=""
+  for id in "${dsk_ids[@]}"; do csv="${csv}${csv:+,}$id"; done
+  python3 "$PLANPY" demarrer --plan "$PLAN" --taches "$csv" || die "demarrer a echoue"
+
+  # 5. separer lecteurs (eclaireur/chercheur) et ecrivains (builder/testeur).
+  # Les lecteurs ne comptent pas dans max_ecrivains et partent tous ensemble ;
+  # les ecrivains partent par lots de max_ecrivains, lot apres lot.
+  local maxe
+  maxe="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["max_ecrivains"])' "$PLAN")" \
+    || die "max_ecrivains illisible dans $PLAN"
+
+  local -a lect=() ecr=()
+  local j
+  for j in "${!dsk_ids[@]}"; do
+    if [[ "${dsk_exec[$j]}" == "eclaireur" || "${dsk_exec[$j]}" == "chercheur" ]]; then
+      lect+=("$j")
+    else
+      ecr+=("$j")
+    fi
+  done
+
+  # lecteurs : tous en parallele.
+  local -a rpids=() rids=()
+  for j in ${lect[@]+"${lect[@]}"}; do
+    id="${dsk_ids[$j]}"
+    lancer_agent "$d" "${dsk_exec[$j]}" "$d/${dsk_brief[$j]}" "$id" >/dev/null 2>&1 &
+    rpids+=("$!"); rids+=("$id")
+  done
+  [[ ${#rpids[@]} -gt 0 ]] && printf 'team: %d lecteur(s) en parallele sur la phase %s...\n' "${#rpids[@]}" "$phase"
+
+  # ecrivains : lots de maxe, on attend la fin de chaque lot avant le suivant.
+  local nlot=$(( (${#ecr[@]} + maxe - 1) / maxe ))
+  local lot=0 debut fin k rc=0
+  while [[ $lot -lt $nlot ]]; do
+    lot=$((lot+1))
+    debut=$(( (lot-1) * maxe )); fin=$(( lot * maxe ))
+    [[ $fin -gt ${#ecr[@]} ]] && fin=${#ecr[@]}
+    local -a wpids=() wids=()
+    for (( k=debut; k<fin; k++ )); do
+      j="${ecr[$k]}"
+      id="${dsk_ids[$j]}"
+      lancer_agent "$d" "${dsk_exec[$j]}" "$d/${dsk_brief[$j]}" "$id" >/dev/null 2>&1 &
+      wpids+=("$!"); wids+=("$id")
+    done
+    printf 'team: lot %d/%d : %d agent(s) ecrivain(s)...\n' "$lot" "$nlot" "${#wpids[@]}"
+    for k in "${!wpids[@]}"; do
+      wait "${wpids[$k]}"; rc=$?
+      rapporter_tache "$PLAN" "$d" "${wids[$k]}" "$rc"
+    done
+  done
+
+  # lecteurs : attendre la fin puis rapporter.
+  for k in ${!rpids[@]+"${!rpids[@]}"}; do
+    wait "${rpids[$k]}"; rc=$?
+    rapporter_tache "$PLAN" "$d" "${rids[$k]}" "$rc"
+  done
+
+  # 7. etat final.
+  python3 "$PLANPY" etat --plan "$PLAN"
+}
+
+cmd_accept() {
+  local run="${1:?usage: team accept <run> <tache> [--relu-opus]}"
+  local tache="${2:?tache manquante}"
+  shift 2
+  local PLAN; PLAN="$(plan_fichier "$run")"
+  python3 "$PLANPY" accepter --plan "$PLAN" --tache "$tache" "$@" || die "accepter refuse"
+}
+
+cmd_fix() {
+  local run="${1:?usage: team fix <run> <tache> <motif>}"
+  local tache="${2:?tache manquante}"
+  local motif="${3:?motif manquant}"
+  local PLAN; PLAN="$(plan_fichier "$run")"
+  python3 "$PLANPY" corriger --plan "$PLAN" --tache "$tache" --motif "$motif" || die "corriger refuse"
+}
+
+cmd_retry() {
+  local run="${1:?usage: team retry <run> <tache> <motif>}"
+  local tache="${2:?tache manquante}"
+  local motif="${3:?motif manquant}"
+  local PLAN; PLAN="$(plan_fichier "$run")"
+  python3 "$PLANPY" relancer --plan "$PLAN" --tache "$tache" --motif "$motif" || die "relancer refuse"
+}
+
+cmd_close() {
+  local run="${1:?usage: team close <run> <phase>}"
+  local phase="${2:?phase manquante}"
+  local PLAN; PLAN="$(plan_fichier "$run")"
+  python3 "$PLANPY" phase-close --plan "$PLAN" --phase "$phase" || die "close refuse"
+}
+
+case "${1:-}" in
+  start)  shift; cmd_start  "$@" ;;
+  run)    shift; cmd_run    "$@" ;;
+  wave)   shift; cmd_wave   "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  roles)  shift; cmd_roles ;;
+  plan)   shift; cmd_plan   "$@" ;;
+  phase)  shift; cmd_phase  "$@" ;;
+  accept) shift; cmd_accept "$@" ;;
+  fix)    shift; cmd_fix    "$@" ;;
+  retry)  shift; cmd_retry  "$@" ;;
+  close)  shift; cmd_close  "$@" ;;
+  ""|-h|--help|help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0" ;;
+  *) die "commande inconnue : $1 (start|run|wave|status|roles|plan|phase|accept|fix|retry|close)" ;;
+esac

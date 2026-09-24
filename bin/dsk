@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# dsk : Claude Code branche sur DeepSeek. Consomme 0 token de quota Anthropic.
+#
+#   dsk                      session interactive
+#   dsk -p "brief"           headless : imprime le rapport final sur stdout
+#   DSK_MODEL=... dsk -p     force un modele (dskf = le petit modele)
+#
+# Config isolee (~/.claude-dsk) : pas de plugins, pas de hooks, pas de memoire.
+# C'est voulu : le builder recoit tout dans son brief, pas dans un system prompt
+# de dizaines de milliers de tokens qu'il paierait a chaque tour.
+set -uo pipefail
+
+ENV_FILE="${ATELIER_ENV:-$HOME/.claude/atelier.env}"
+[[ -r "$ENV_FILE" ]] || { echo "dsk: $ENV_FILE manquant, lance : atelier key" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+: "${DEEPSEEK_API_KEY:?dsk: DEEPSEEK_API_KEY vide, lance : atelier key}"
+
+MODEL="${DSK_MODEL:-${DSK_PRO_MODEL:-deepseek-v4-pro}}"
+SMALL="${DSK_SMALL_MODEL:-deepseek-flash}"
+# Alias utilises par les roles de `team` : la config choisit les vrais ids.
+case "$MODEL" in
+  pro)   MODEL="${DSK_PRO_MODEL:-deepseek-v4-pro}" ;;
+  flash) MODEL="$SMALL" ;;
+esac
+
+export CLAUDE_CONFIG_DIR="${DSK_CONFIG_DIR:-$HOME/.claude-dsk}"
+export ANTHROPIC_BASE_URL="${DSK_BASE_URL:-https://api.deepseek.com/anthropic}"
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL"
+export ANTHROPIC_SMALL_FAST_MODEL="$SMALL"
+export CLAUDE_CODE_SUBAGENT_MODEL="$MODEL"
+
+# Une cle Anthropic residuelle serait preferee au token : elle doit disparaitre.
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+# Le hook de session de l'Atelier ne doit pas s'injecter dans le builder.
+export ATELIER_DISABLE=1
+
+# Les ids DeepSeek sont absents du catalogue de Claude Code : sans ca, il suppose
+# une autre fenetre et n'auto-compacte pas au bon moment.
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${DSK_CONTEXT:-128000}"
+
+# Headless : pas de stdin a attendre, et pas de prompt de permission a negocier
+# (un agent headless ne sait pas y repondre et se bloque).
+# Journal : un appel = une ligne dans metrics/dsk.jsonl (dskstats le resume). Une fois
+# par jour, un instantane du solde part en arriere-plan pour mesurer la depense.
+METRICS="${DSK_METRICS_DIR:-$HOME/.claude/metrics}"
+journaliser() {
+  local rc=$1 fin; fin=$(date +%s)
+  mkdir -p "$METRICS" 2>/dev/null || return 0
+  local dir="${PWD//\\/\\\\}"; dir="${dir//\"/\\\"}"
+  printf '{"ts":"%s","model":"%s","mode":"%s","cwd":"%s","secondes":%d,"rc":%d}\n' \
+    "$(date +%Y-%m-%dT%H:%M:%S)" "$MODEL" "$MODE" "$dir" $((fin - DEBUT)) "$rc" >> "$METRICS/dsk.jsonl"
+  local jour; jour=$(date +%Y-%m-%d)
+  if ! grep -q "\"$jour\"" "$METRICS/dsk-solde.jsonl" 2>/dev/null; then
+    ( s=$(curl -fsS --max-time 8 https://api.deepseek.com/user/balance \
+          -H "Authorization: Bearer $DEEPSEEK_API_KEY" 2>/dev/null |
+          python3 -c 'import sys,json; print(json.load(sys.stdin)["balance_infos"][0]["total_balance"])' 2>/dev/null) \
+      && [[ -n "$s" ]] && printf '{"date":"%s","solde":%s}\n' "$jour" "$s" >> "$METRICS/dsk-solde.jsonl" ) \
+      >/dev/null 2>&1 &
+  fi
+}
+DEBUT=$(date +%s)
+if [[ " $* " == *" -p "* || " $* " == *" --print "* ]]; then
+  MODE=headless
+  if [[ " $* " != *"--permission-mode"* && " $* " != *"--dangerously-skip-permissions"* ]]; then
+    set -- "$@" --permission-mode bypassPermissions
+  fi
+  claude "$@" < /dev/null; rc=$?
+else
+  MODE=interactif
+  claude "$@"; rc=$?
+fi
+journaliser "$rc"
+exit "$rc"

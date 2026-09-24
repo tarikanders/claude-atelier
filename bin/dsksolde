@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# dsksolde : affiche le solde DeepSeek. A zero, dsk echoue (aucune bascule auto).
+set -uo pipefail
+ENV_FILE="${ATELIER_ENV:-$HOME/.claude/atelier.env}"
+[[ -r "$ENV_FILE" ]] || { echo "dsksolde: pas de cle, lance : atelier key" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+[[ -n "${DEEPSEEK_API_KEY:-}" ]] || { echo "dsksolde: DEEPSEEK_API_KEY vide, lance : atelier key" >&2; exit 1; }
+rep="$(curl -sS --max-time 8 -w '\n%{http_code}' https://api.deepseek.com/user/balance \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" 2>&1)" || { echo "dsksolde: DeepSeek injoignable" >&2; exit 1; }
+code="${rep##*$'\n'}"; corps="${rep%$'\n'*}"
+case "$code" in
+  200) ;;
+  401|403) echo "dsksolde: cle refusee par DeepSeek (HTTP $code)" >&2; exit 1 ;;
+  *) echo "dsksolde: reponse inattendue (HTTP $code)" >&2; exit 1 ;;
+esac
+printf '%s' "$corps" | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+for b in d.get("balance_infos",[]): print("DeepSeek :", b["total_balance"], b["currency"])
+if not d.get("is_available", True): print("!! compte indisponible (solde epuise ?)"); sys.exit(1)'
