@@ -3,3 +3,5 @@ __pycache__/
 .team/
 *.env
 .DS_Store
+
+graphify-out/
