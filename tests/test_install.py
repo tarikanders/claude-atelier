@@ -26,9 +26,11 @@ class Installeur(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def lancer(self, *args):
+    def lancer(self, *args, config_dir=None):
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_MODE", "CLAUDE_CONFIG_DIR", "ATELIER_ENV", "DSK_CONFIG_DIR")}
         env.update(HOME=self.home, SHELL="/bin/zsh")
+        if config_dir:
+            env["CLAUDE_CONFIG_DIR"] = config_dir
         r = subprocess.run(["bash", INSTALL, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r
@@ -48,6 +50,7 @@ class Installeur(unittest.TestCase):
         self.assertIn("mon-hook", cmds)
         self.assertEqual(sum("bash_guard.py" in c for c in cmds), 1)
         self.assertEqual(sum("session_context.py" in c for c in cmds), 1)
+        self.assertEqual(sum("hooks/contexte.py" in c for c in cmds), 0)
         self.assertEqual(s["model"], "opus")
         dsk = json.loads(self.lire(".claude-dsk", "settings.json"))
         self.assertIn("bash_guard.py", json.dumps(dsk))
@@ -66,6 +69,17 @@ class Installeur(unittest.TestCase):
         self.assertIn("export FOO=1", self.lire(".zshrc"))
         self.assertFalse(os.path.exists(os.path.join(self.home, ".claude", "atelier")))
         self.assertTrue(os.path.exists(env_file))
+
+    def test_second_compte_lie_installe_dans_la_config_partagee(self):
+        second = os.path.join(self.home, ".claude-florym")
+        os.makedirs(second)
+        for n in ("settings.json", "CLAUDE.md"):
+            os.symlink(os.path.join(self.home, ".claude", n), os.path.join(second, n))
+        self.lancer("--yes", "--no-shell", config_dir=second)
+        self.assertFalse(os.path.exists(os.path.join(second, "atelier")))
+        self.assertTrue(os.path.exists(os.path.join(self.home, ".claude", "atelier", "bin", "echec")))
+        self.assertIn("@~/.claude/atelier/core/WORKFLOW.md", self.lire(".claude", "CLAUDE.md"))
+        self.assertTrue(os.path.islink(os.path.join(second, "settings.json")))
 
     def test_cle_fournie(self):
         self.lancer("--yes", "--key", "sk-factice", "--skip-permissions", "--no-shell")

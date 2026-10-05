@@ -38,3 +38,19 @@ A → B ; C en parallèle de B (fichiers disjoints).
 ## 5. Pièges connus
 
 - Ce qui a été mesuré ou découvert pendant le cadrage et qu'il ne faut pas redécouvrir.
+
+## 6. Reprise
+
+<!-- Écrite avant un /clear, à un point d'arrêt propre (étape finie, tests lancés).
+     Le hook de démarrage la réinjecte dans la session suivante. Une seule question
+     décide chaque ligne : la prochaine session se tromperait-elle sans ça ?
+     Vider la section quand la feature est livrée (ce qui reste vrai part en §5). -->
+
+- **Maintenant** : ... (où en est le travail à cette seconde ; réécrit en entier à chaque reprise)
+- **Appris** : ... (ce qu'aucun fichier ne dit ; on ajoute, on garde tant que c'est vrai)
+- **Ouvert** : ... (décisions à moitié prises, et l'option vers laquelle on penchait)
+- **Touchés** : ... (fichiers modifiés hors des livrables des lots)
+
+```ouvrir
+chemin/fichier.ts:20-45   # pourquoi l'ouvrir
+```

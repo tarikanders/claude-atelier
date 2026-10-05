@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""echec : journal des echecs silencieux, lu par Claude au demarrage de chaque session.
+
+  echec signale <source> <message>   note un echec (un script, un job, l'agent)
+  echec ok <source>                  le travail a de nouveau marche : l'echec se ferme
+  echec liste                        les echecs encore ouverts
+  echec veille [--si-perime]         interroge launchd et Cloud Run, note ce qui echoue
+
+Un echec reste ouvert tant que sa source n'a pas ecrit `ok`. La veille ecrit elle-meme
+`ok` quand un job repasse au vert. Elle lit :
+  - launchd : les jobs dont le label commence par ATELIER_VEILLE_LAUNCHD (defaut
+    com.mustafa.) et dont le dernier code de sortie n'est pas 0 ;
+  - Cloud Run Jobs : pour chaque "projet:region" de ATELIER_VEILLE_GCP, la derniere
+    execution terminee de chaque job.
+Journal : $ATELIER_ECHECS (defaut ~/.claude/metrics/echecs.jsonl), une ligne JSON par
+evenement. Ne leve jamais d'erreur vers l'appelant d'un hook : `liste` rend 0 meme vide.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+ENV_FILE = os.environ.get("ATELIER_ENV") or os.path.join(HOME, ".claude", "atelier.env")
+JOURNAL = os.environ.get("ATELIER_ECHECS") or os.path.join(HOME, ".claude", "metrics", "echecs.jsonl")
+VEILLE_STAMP = JOURNAL + ".veille"
+PERIME_SECONDES = 6 * 3600
+
+
+def lire_env(chemin):
+    valeurs = {}
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            for ligne in f:
+                m = re.match(r'\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)', ligne)
+                if m:
+                    valeurs[m.group(1)] = m.group(2).strip().strip('"\'')
+    except OSError:
+        pass
+    return valeurs
+
+
+def config(cle, defaut=""):
+    return os.environ.get(cle) or lire_env(ENV_FILE).get(cle) or defaut
+
+
+def maintenant():
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def ecrire(source, statut, message=""):
+    os.makedirs(os.path.dirname(JOURNAL), exist_ok=True)
+    with open(JOURNAL, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": maintenant(), "source": source, "statut": statut,
+                            "message": message[:300]}, ensure_ascii=False) + "\n")
+
+
+def lire():
+    evts = []
+    try:
+        with open(JOURNAL, encoding="utf-8") as f:
+            for ligne in f:
+                try:
+                    evts.append(json.loads(ligne))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return evts
+
+
+def ouverts():
+    """{source: dernier evenement} pour les sources dont le dernier evenement est un echec."""
+    dernier = {}
+    for e in lire():
+        if e.get("source"):
+            dernier[e["source"]] = e
+    return {s: e for s, e in dernier.items() if e.get("statut") == "echec"}
+
+
+def etat_actuel(source):
+    e = None
+    for x in lire():
+        if x.get("source") == source:
+            e = x
+    return e.get("statut") if e else None
+
+
+def noter(source, en_echec, message):
+    """N'ecrit que les changements d'etat, pour que le journal reste court."""
+    actuel = etat_actuel(source)
+    if en_echec and actuel != "echec":
+        ecrire(source, "echec", message)
+    elif not en_echec and actuel == "echec":
+        ecrire(source, "ok")
+
+
+def veille_launchd(prefixe):
+    try:
+        r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return
+    for ligne in r.stdout.splitlines()[1:]:
+        parts = ligne.split("\t")
+        if len(parts) != 3 or not parts[2].startswith(prefixe):
+            continue
+        code = parts[1].strip()
+        en_echec = code not in ("0", "-") and not code.startswith("-")  # negatif = tue par signal, souvent un arret voulu
+        noter("launchd:" + parts[2], en_echec, f"dernier code de sortie {code}")
+
+
+def veille_cloud_run(projet, region):
+    cmd = ["gcloud", "run", "jobs", "executions", "list", "--project", projet, "--region", region,
+           "--limit", "200", "--format=json"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        execs = json.loads(r.stdout or "[]") if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        execs = None
+    if execs is None:
+        noter(f"veille:{projet}", True, "gcloud ne repond pas (auth expiree ?) : `gcloud auth login`")
+        return
+    noter(f"veille:{projet}", False, "")
+    vus = set()
+    for x in execs:  # gcloud rend les executions de la plus recente a la plus ancienne
+        meta, st = x.get("metadata") or {}, x.get("status") or {}
+        job = (meta.get("labels") or {}).get("run.googleapis.com/job")
+        fini = next((c for c in st.get("conditions") or [] if c.get("type") == "Completed"), {})
+        if not job or job in vus or fini.get("status") not in ("True", "False"):
+            continue
+        vus.add(job)
+        en_echec = fini.get("status") == "False"
+        quand = (meta.get("creationTimestamp") or "")[:16].replace("T", " ")
+        noter(f"cloudrun:{projet}/{job}", en_echec,
+              f"execution du {quand} UTC : {(fini.get('message') or 'en echec')[:160]}")
+
+
+def cmd_veille(si_perime):
+    if si_perime:
+        try:
+            if time.time() - os.path.getmtime(VEILLE_STAMP) < PERIME_SECONDES:
+                return 0
+        except OSError:
+            pass
+    os.makedirs(os.path.dirname(VEILLE_STAMP), exist_ok=True)
+    with open(VEILLE_STAMP, "w") as f:  # avant le travail : deux sessions ne lancent pas deux veilles
+        f.write(maintenant() + "\n")
+    veille_launchd(config("ATELIER_VEILLE_LAUNCHD", "com.mustafa."))
+    for cible in config("ATELIER_VEILLE_GCP").split():
+        projet, _, region = cible.partition(":")
+        if projet:
+            veille_cloud_run(projet, region or "europe-west1")
+    return 0
+
+
+def cmd_liste():
+    o = ouverts()
+    if not o:
+        print("aucun echec ouvert")
+        return 0
+    for s, e in sorted(o.items(), key=lambda kv: kv[1].get("at", "")):
+        print(f"{e.get('at', '?')[:16].replace('T', ' ')}  {s}  {e.get('message', '')}")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    cmd, args = argv[0], argv[1:]
+    if cmd == "signale" and len(args) >= 2:
+        ecrire(args[0], "echec", " ".join(args[1:]))
+        return 0
+    if cmd == "ok" and len(args) == 1:
+        if etat_actuel(args[0]) == "echec":
+            ecrire(args[0], "ok")
+        return 0
+    if cmd == "liste":
+        return cmd_liste()
+    if cmd == "veille":
+        return cmd_veille("--si-perime" in args)
+    print(f"echec: commande invalide : {' '.join(argv)} (echec --help)", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

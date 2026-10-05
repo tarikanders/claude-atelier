@@ -125,7 +125,8 @@ lancer_agent() {
   )"
 
   local rc
-  DSK_MODEL="$model" "$DSK" -p "$prompt" >"$log" 2>&1
+  # Pas de releve git par agent : ils tournent en parallele, chaque diff melangerait les autres.
+  DSK_RELEVE=0 DSK_MODEL="$model" "$DSK" -p "$prompt" >"$log" 2>&1
   rc=$?
 
   if grep -qiE 'insufficient balance|authentication_error|invalid api key|invalid_api_key|402 ' "$log"; then

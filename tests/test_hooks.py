@@ -72,7 +72,8 @@ class ContexteSession(unittest.TestCase):
             if env_texte is not None:
                 with open(env_file, "w") as f:
                     f.write(env_texte)
-            env = {**os.environ, "ATELIER_ENV": env_file, "ATELIER_HOME": RACINE}
+            env = {**os.environ, "ATELIER_ENV": env_file, "ATELIER_HOME": RACINE, "ATELIER_VEILLE": "off",
+                   "ATELIER_ECHECS": os.path.join(tmp, "echecs.jsonl")}
             env.pop("CLAUDE_MODE", None)
             env.pop("ATELIER_DISABLE", None)
             if mode:

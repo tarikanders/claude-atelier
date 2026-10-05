@@ -83,8 +83,46 @@ Racine git, branche, nombre de fichiers modifiés ; stack via les manifestes (No
 son gestionnaire, frameworks courants, Python, Go, Rust, JVM, Ruby, PHP, Flutter,
 Swift, Makefile) et commandes de test associées ; présence d'un `CLAUDE.md` de projet ;
 fichiers `.md` en majuscules à la racine (documents de pilotage) ; runs `team` en
-cours. Aucun appel réseau, aucune écriture, moins d'une seconde. En cas d'erreur, il
-rend un bloc minimal : il ne bloque jamais le démarrage.
+cours ; la section `## Reprise` la plus récente d'un document de pilotage ; les échecs
+ouverts du journal. Aucun appel réseau, moins d'une seconde. En cas d'erreur, il rend
+un bloc minimal : il ne bloque jamais le démarrage.
+
+## Échecs silencieux : `echec`
+
+Un journal (`~/.claude/metrics/echecs.jsonl`) d'échecs que personne ne voit. Un échec
+reste ouvert jusqu'à ce que sa source écrive `ok`, et chaque session l'annonce au
+démarrage. Trois sources :
+
+- `echec signale <source> "<message>"` : un script, un job ou Claude lui-même ;
+- la veille launchd : les jobs `com.mustafa.*` (`ATELIER_VEILLE_LAUNCHD`) dont le dernier
+  code de sortie n'est pas 0 ;
+- la veille Cloud Run : la dernière exécution terminée de chaque job des projets listés
+  dans `ATELIER_VEILLE_GCP` (`projet:region`, séparés par des espaces).
+
+La veille part en arrière-plan au démarrage d'une session si la précédente date de plus
+de 6 h : la session ne l'attend pas, son résultat sert à la suivante. Elle ferme seule un
+échec quand le job repasse au vert. Un `gcloud` qui ne répond plus (auth expirée) devient
+lui-même un échec, pour que la veille ne se taise pas en silence.
+
+Limite : un job qui sort en 0 sans rien faire (« envoi OK », zéro envoi) n'est vu que s'il
+appelle lui-même `echec signale`.
+
+## Reprise plutôt que /compact
+
+En fin de session sur un travail inachevé, Claude écrit la section `## Reprise` du document
+de pilotage (`REPRISE.md` sans document) et propose `/clear`. Le hook de démarrage
+réinjecte la reprise dans la session suivante. Aucune alerte de taille du contexte : la
+session va jusqu'au bout de la fenêtre. Un résumé `/compact` garde un peu de tout
+et ne vit que dans la conversation ; la reprise garde ce que la session suivante ferait
+de travers sans elle, dans un fichier.
+
+## Le relevé de `dsk`
+
+En headless dans un dépôt git, `dsk` photographie l'arbre de travail avant et après
+l'appel (index git temporaire : le staging de l'utilisateur ne bouge pas) et imprime le
+diff réel, puis `RELEVE: n fichier(s) ; diff complet : <fichier>`. Opus tranche sur ce
+relevé, pas sur la ligne `STATUT` de l'agent. `team` le coupe (`DSK_RELEVE=0`) : ses
+agents tournent en parallèle et chaque diff mélangerait les autres.
 
 ## Limites connues
 

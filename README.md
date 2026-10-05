@@ -80,10 +80,12 @@ disponibles si tu veux lancer un agent DeepSeek à la main (`dsk -p "..."`).
  tu tapes `c` ─► Claude Code démarre
                  ├─ ~/.claude/CLAUDE.md importe atelier/WORKFLOW.md   (les règles)
                  └─ hook SessionStart ─► [Atelier] mode, DeepSeek, projet, stack,
-                                         tests, docs de pilotage, règles du mode
+                                         tests, docs de pilotage, reprise en cours,
+                                         échecs ouverts (launchd, Cloud Run), règles du mode
  ta demande ───► Opus reformule, situe, découpe
                  ├─ chercher / lire en masse ──► dskf  (DeepSeek flash)
-                 ├─ écrire le code ────────────► dsk   (DeepSeek pro, tests lancés)
+                 ├─ écrire le code ────────────► dsk   (DeepSeek pro, tests lancés,
+                 │                                      relevé git du diff réel en sortie)
                  ├─ plusieurs lots ────────────► team  (N agents en parallèle,
                  │                                      fichiers disjoints vérifiés)
                  ├─ 1re relecture ─────────────► dsk   (autre invocation que le bâtisseur)
@@ -101,7 +103,7 @@ Détails : [docs/FONCTIONNEMENT.md](docs/FONCTIONNEMENT.md).
   core/modes/             atelier.md, solo.md (injectés par le hook selon le mode)
   hooks/session_context.py  contexte projet au démarrage (aucun appel réseau, < 1 s)
   hooks/bash_guard.py     garde-fous Bash
-  bin/                    dsk, dskf, dsksolde, dskstats, team, atelier
+  bin/                    dsk, dskf, dsksolde, dskstats, team, atelier, echec
   team/                   moteur d'équipe : rôles, validateur de vague, plan par phases
   templates/              CLAUDE.projet.md, PILOTAGE.md
 ~/.claude/skills/team/    le skill que Claude charge seul pour piloter l'équipe

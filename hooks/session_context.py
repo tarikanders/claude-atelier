@@ -126,6 +126,63 @@ def runs_team(racine):
         return []
 
 
+TITRE_REPRISE = re.compile(r"^##\s+(?:\d+\.\s*)?Reprise\b.*$", re.M | re.I)
+
+
+def section_reprise(chemin):
+    """Texte de la section `## Reprise` d'un document, ou "" si absente ou encore vierge."""
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            texte = f.read()
+    except OSError:
+        return ""
+    m = TITRE_REPRISE.search(texte)
+    if not m:
+        return ""
+    fin = re.search(r"^##\s", texte[m.end():], re.M)
+    corps = texte[m.end():m.end() + fin.start()] if fin else texte[m.end():]
+    corps = re.sub(r"<!--.*?-->", "", corps, flags=re.S).strip()
+    # Le gabarit vierge ne contient que des "..." et l'exemple chemin/fichier.ts : rien a reprendre.
+    gabarit = re.compile(r"^(-\s+\*\*[^*]+\*\*\s*:\s*\.\.\.(\s+\(.*\))?|```\w*|chemin/fichier\.\w+.*)$")
+    if all(not l.strip() or gabarit.match(l.strip()) for l in corps.splitlines()):
+        return ""
+    lignes = corps.splitlines()
+    return "\n".join(lignes[:40]) + ("\n(...)" if len(lignes) > 40 else "")
+
+
+def reprise(racine, docs):
+    """(document, section) de la reprise la plus recente parmi les docs de pilotage."""
+    candidats = []
+    for nom in docs:
+        chemin = os.path.join(racine, nom)
+        corps = section_reprise(chemin)
+        if corps:
+            candidats.append((os.path.getmtime(chemin), nom, corps))
+    if not candidats:
+        return None
+    _, nom, corps = max(candidats)
+    return nom, corps
+
+
+def echecs_ouverts():
+    """Lignes des echecs ouverts (bin/echec), et lance la veille si elle date de plus de 6 h."""
+    echec = os.path.join(ATELIER, "bin", "echec")
+    if not os.path.exists(echec):
+        return []
+    if os.environ.get("ATELIER_VEILLE", "on") != "off":
+        try:  # en arriere-plan : la session ne l'attend pas, le resultat sert a la suivante
+            subprocess.Popen([sys.executable, echec, "veille", "--si-perime"], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+    try:
+        r = subprocess.run([sys.executable, echec, "liste"], capture_output=True, text=True, timeout=3)
+    except Exception:
+        return []
+    lignes = [l for l in r.stdout.splitlines() if l.strip() and l != "aucun echec ouvert"]
+    return lignes[:8]
+
+
 def construire(cwd):
     config = lire_env(ENV_FILE)
     mode, raison = resoudre_mode(config)
@@ -157,9 +214,19 @@ def construire(cwd):
     docs = docs_pilotage(racine)
     if docs:
         lignes.append("Documents de pilotage : " + ", ".join(docs) + " (lis celui qui concerne la demande avant d'agir).")
+        r = reprise(racine, docs)
+        if r:
+            lignes.append(f"\nReprise en cours, tiree de {r[0]} (section Reprise) : si la demande porte dessus, "
+                          "ouvre d'abord les fichiers du bloc `ouvrir` et reprends a « Maintenant ».\n" + r[1])
     runs = runs_team(racine)
     if runs and mode != "solo":
         lignes.append("Runs team existants : " + ", ".join(runs) + " (`team status <run>`).")
+    echecs = echecs_ouverts()
+    if echecs:
+        lignes.append(f"\n⚠ {len(echecs)} échec(s) ouvert(s) hors de cette session. Signale-les à Mustafa en une "
+                      f"ligne en tête de ta première réponse, même si la demande porte sur autre chose. Détail : "
+                      f"`{ATELIER}/bin/echec liste` ; une fois réparé : `echec ok <source>`.\n"
+                      + "\n".join("  " + l for l in echecs))
 
     if mode != "normal":
         chemin = os.path.join(ATELIER, "core", "modes", f"{mode}.md")

@@ -47,8 +47,12 @@ Anthropic (~0,01 $ la tâche).** Trois modes changent le curseur :
 ~/.claude/atelier/bin/dskf -p "<brief>"   # chercher, compter, résumer
 ```
 
-Le `cwd` du Bash est le dépôt ciblé. Seule la **dernière ligne** de sortie compte :
-exige dans le brief un format court, par exemple `STATUT: OK|PARTIEL|BLOQUE - <résumé>`.
+Le `cwd` du Bash est le dépôt ciblé. Exige dans le brief une ligne finale courte,
+par exemple `STATUT: OK|PARTIEL|BLOQUE - <résumé>` : c'est le résumé de l'agent.
+Dans un dépôt git, `dsk -p` imprime ensuite son **relevé** : le diff réel de l'appel,
+calculé par git, et une ligne `RELEVE: n fichier(s) ; diff complet : <chemin>`. **Tu
+tranches sur le relevé, jamais sur le STATUT** : un fichier hors périmètre, une
+modification absente ou un test affaibli se voient là, pas dans le rapport.
 
 **Seuils (en opérations, pas en outils) :**
 
@@ -141,6 +145,12 @@ quand » de ce lot précis. Un lot n'est coché que quand ses tests passent **et
 recette manuelle a été rejouée, jamais sur parole. Pour une petite
 tâche, une liste de tâches suffit : pas de document.
 
+**Reprise plutôt que /compact.** En fin de session sur un travail inachevé : à un point d'arrêt propre, écris la section
+`## Reprise` du document de pilotage (§6 du gabarit : Maintenant, Appris, Ouvert,
+Touchés, bloc `ouvrir`). Sans document, écris `REPRISE.md` à la racine avec la même
+section. Puis propose `/clear` : le hook de démarrage réinjecte la reprise. Vide la
+section quand le travail est livré.
+
 ## 7. Garde-fous
 
 - **Lire avant d'éditer**, toujours. Jamais d'écriture à l'aveugle.
@@ -152,6 +162,9 @@ tâche, une liste de tâches suffit : pas de document.
 - Écritures parallèles sur un même fichier : jamais. Lectures parallèles : oui.
 - Gros volume de sortie → l'agent écrit dans un fichier, le suivant lit ce fichier.
   Aucun dump de code dans ton contexte.
+- **Échec silencieux découvert** (job qui dit OK sans rien faire, clé morte, envoi à
+  zéro) : `~/.claude/atelier/bin/echec signale <source> "<ce qui ne marche pas>"`. Il
+  remontera au démarrage de chaque session jusqu'à `echec ok <source>`.
 
 ## 8. Fin de réponse : ce à quoi l'utilisateur n'a pas pensé
 

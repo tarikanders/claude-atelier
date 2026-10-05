@@ -5,6 +5,7 @@
 #   atelier contexte   affiche ce que Claude recoit au demarrage dans ce dossier
 #   atelier key        enregistre ou remplace la cle DeepSeek (et la teste)
 #   atelier mode [m]   affiche le mode par defaut, ou le fixe (auto|normal|atelier|solo)
+#   atelier echecs     les echecs ouverts (journal lu au demarrage de chaque session)
 #   atelier version
 set -uo pipefail
 
@@ -41,7 +42,7 @@ cmd_doctor() {
 import json, sys
 s = json.load(open(sys.argv[1]))
 h = json.dumps(s.get("hooks", {}))
-sys.exit(0 if "atelier/hooks/session_context.py" in h and "atelier/hooks/bash_guard.py" in h else 1)
+sys.exit(0 if all(f"atelier/hooks/{n}" in h for n in ("session_context.py", "bash_guard.py")) else 1)
 PY
   then ok "hooks declares dans settings.json"; else ko "hooks absents de settings.json (relance install.sh)"; fi
   [[ -f "$CLAUDE_DIR/skills/team/SKILL.md" ]] && ok "skill team" || warn "skill team absent"
@@ -56,6 +57,13 @@ PY
     [[ "$perm" == "600" ]] && ok "droits du fichier de cle : 600" || warn "droits de $ENV_FILE : $perm (conseille : chmod 600)"
     if out="$("$ATELIER_HOME/bin/dsksolde" 2>&1)"; then ok "$out"; else ko "solde illisible : $out"; fi
   fi
+
+  echo "Echecs"
+  local e; e="$("$ATELIER_HOME/bin/echec" liste 2>&1)"
+  if [[ "$e" == "aucun echec ouvert" ]]; then ok "$e"
+  else warn "echecs ouverts :"; printf '%s\n' "$e" | sed 's/^/         /'; fi
+  local veille; veille="$(env_get ATELIER_VEILLE_GCP)"
+  ok "veille : launchd ($(env_get ATELIER_VEILLE_LAUNCHD | grep . || echo com.mustafa.))${veille:+ + Cloud Run ($veille)}"
 
   echo "Mode"
   ok "par defaut : $(env_get ATELIER_MODE | grep . || echo auto)"
@@ -90,6 +98,7 @@ case "${1:-}" in
   contexte) python3 "$ATELIER_HOME/hooks/session_context.py" --texte ;;
   key)      shift; cmd_key "$@" ;;
   mode)     shift; cmd_mode "$@" ;;
+  echecs)   "$ATELIER_HOME/bin/echec" liste ;;
   version)  cat "$ATELIER_HOME/VERSION" 2>/dev/null || echo inconnue ;;
   ""|-h|--help|help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0" ;;
   *) echo "atelier: commande inconnue : $1" >&2; exit 1 ;;

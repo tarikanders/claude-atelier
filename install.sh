@@ -12,6 +12,11 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# Un second compte dont settings.json est un lien vers la config partagee : on installe
+# dans le dossier reel, sinon les hooks partages pointeraient vers ce compte-ci.
+if [[ -L "$CLAUDE_DIR/settings.json" ]]; then
+  CLAUDE_DIR="$(cd "$CLAUDE_DIR" && cd "$(dirname "$(readlink settings.json)")" && pwd)"  # lien relatif ou absolu
+fi
 DEST="$CLAUDE_DIR/atelier"
 ENV_FILE="${ATELIER_ENV:-$HOME/.claude/atelier.env}"
 DSK_DIR="${DSK_CONFIG_DIR:-$HOME/.claude-dsk}"
@@ -88,7 +93,7 @@ def nettoyer(evt):
     else:
         hooks.pop(evt, None)
 
-for evt in ("SessionStart", "PreToolUse"):
+for evt in ("SessionStart", "PreToolUse", "UserPromptSubmit"):
     nettoyer(evt)
 
 if action in ("add", "dsk"):
@@ -158,7 +163,7 @@ retirer_bloc "$CLAUDE_DIR/CLAUDE.md" "<!-- >>> claude-atelier >>> -->" "<!-- <<<
 
 say "Hooks dans $CLAUDE_DIR/settings.json"
 settings "$CLAUDE_DIR/settings.json" add
-note "SessionStart : contexte projet + mode ; PreToolUse(Bash) : garde-fous"
+note "SessionStart : contexte projet, mode, echecs ouverts ; PreToolUse(Bash) : garde-fous"
 
 # ---------------------------------------------------------------- DeepSeek
 say "Configuration DeepSeek ($ENV_FILE)"

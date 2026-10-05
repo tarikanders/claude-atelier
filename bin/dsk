@@ -64,13 +64,54 @@ journaliser() {
       >/dev/null 2>&1 &
   fi
 }
+# Releve : ce que dsk a VRAIMENT change, calcule par git et non tire de son rapport.
+# Une photo de tout l'arbre (suivis + non suivis, hors .gitignore) avant et apres,
+# dans un index temporaire : l'index et le staging de l'utilisateur ne bougent pas.
+# Tout ce qui change pendant l'appel y figure, y compris une modif faite a la main
+# en parallele. DSK_RELEVE=0 le coupe (team le coupe : ses agents tournent en parallele).
+RACINE=""; GITDIR=""; AVANT=""
+photo() {
+  local idx; idx="$(mktemp)" || return 1
+  cp "$GITDIR/index" "$idx" 2>/dev/null || rm -f "$idx"  # copie = cache de stat, bien plus rapide
+  GIT_INDEX_FILE="$idx" git -C "$RACINE" add -A . >/dev/null 2>&1 &&
+    GIT_INDEX_FILE="$idx" git -C "$RACINE" write-tree 2>/dev/null
+  rm -f "$idx"
+}
+releve() {
+  if [[ -z "$RACINE" ]]; then
+    echo "RELEVE: pas de depot git ici, aucun releve : verifie les fichiers toi-meme"; return
+  fi
+  local apres; apres="$(photo)"
+  if [[ -z "$AVANT" || -z "$apres" ]]; then echo "RELEVE: photo git impossible, aucun releve"; return; fi
+  if [[ "$AVANT" == "$apres" ]]; then echo "RELEVE: aucun fichier modifie par dsk"; return; fi
+  local dir="$METRICS/dsk-releves" max="${DSK_RELEVE_LIGNES:-400}" f n lignes
+  mkdir -p "$dir"
+  f="$dir/$(date +%Y%m%d-%H%M%S)-$$.diff"
+  git -C "$RACINE" diff --no-color "$AVANT" "$apres" > "$f"
+  n="$(git -C "$RACINE" diff --name-only "$AVANT" "$apres" | wc -l | tr -d ' ')"
+  lignes="$(wc -l < "$f" | tr -d ' ')"
+  printf '\n=== Releve dsk : le diff reel de cet appel (git), c est lui qui fait foi ===\n'
+  git -C "$RACINE" diff --stat=100 "$AVANT" "$apres" | tail -n 40
+  echo
+  head -n "$max" "$f"
+  (( lignes > max )) && echo "... diff tronque ($lignes lignes) : lis $f"
+  echo "RELEVE: $n fichier(s) modifie(s) par dsk ; diff complet : $f"
+}
+
 DEBUT=$(date +%s)
 if [[ " $* " == *" -p "* || " $* " == *" --print "* ]]; then
   MODE=headless
   if [[ " $* " != *"--permission-mode"* && " $* " != *"--dangerously-skip-permissions"* ]]; then
     set -- "$@" --permission-mode bypassPermissions
   fi
+  if [[ "${DSK_RELEVE:-1}" != "0" ]] && RACINE="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    GITDIR="$(git rev-parse --absolute-git-dir 2>/dev/null)"
+    AVANT="$(photo)"
+  else
+    RACINE=""
+  fi
   claude "$@" < /dev/null; rc=$?
+  [[ "${DSK_RELEVE:-1}" != "0" ]] && releve
 else
   MODE=interactif
   claude "$@"; rc=$?

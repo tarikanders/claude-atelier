@@ -15,7 +15,7 @@ jobs:
       - name: Syntaxe des scripts
         run: |
           for f in install.sh bin/dsk bin/dskf bin/dsksolde bin/team bin/atelier shell/atelier.sh; do bash -n "$f"; done
-          python3 -m py_compile bin/dskstats hooks/*.py team/*.py
+          python3 -m py_compile bin/dskstats bin/echec hooks/*.py team/*.py
       - name: Moteur d'equipe
         run: python3 -B -m unittest discover -s team -p 'test_*.py'
       - name: Hooks et installeur

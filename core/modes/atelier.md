@@ -29,4 +29,3 @@ Règle de bascule : si tu hésites entre faire et déléguer, **fais-le**.
 Sous-agents Claude : toujours limités aux trois cas de la section 4. Mode atelier ne veut
 pas dire plus de sous-agents, il veut dire que **la session principale** travaille plus.
 Pas d'équipe `team` sauf demande explicite.
-Si le contexte dépasse ~400k tokens, repasse aux seuils du mode normal pour la lecture.
